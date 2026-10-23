@@ -1,7 +1,7 @@
 /*-------------------------------------------------------------------------
  *
  * auth-scram.c
- *	  Server-side implementation of the SASL SCRAM-SHA-256 mechanism.
+ *	  Server-side implementation of the SASL SCRAM-SHA-256 and SCRAM-SM3 mechanisms.
  *
  * See the following RFCs for more details:
  * - RFC 5802: https://tools.ietf.org/html/rfc5802
@@ -103,6 +103,12 @@
 #include "libpq/scram.h"
 
 static void scram_get_mechanisms(Port *port, StringInfo buf);
+static void scram_sm3_get_mechanisms(Port *port, StringInfo buf);
+static void *scram_sm3_init(Port *port, const char *selected_mech,
+							 const char *shadow_pass);
+static void *scram_init_common(Port *port, const char *selected_mech,
+								const char *shadow_pass, pg_cryptohash_type hash_type);
+static char *build_scram_secret(const char *password, pg_cryptohash_type hash_type);
 static void *scram_init(Port *port, const char *selected_mech,
 						const char *shadow_pass);
 static int	scram_exchange(void *opaq, const char *input, int inputlen,
@@ -113,6 +119,12 @@ static int	scram_exchange(void *opaq, const char *input, int inputlen,
 const pg_be_sasl_mech pg_be_scram_mech = {
 	scram_get_mechanisms,
 	scram_init,
+	scram_exchange
+};
+
+const pg_be_sasl_mech pg_be_scram_sm3_mech = {
+	scram_sm3_get_mechanisms,
+	scram_sm3_init,
 	scram_exchange
 };
 
@@ -176,7 +188,7 @@ static char *build_server_first_message(scram_state *state);
 static char *build_server_final_message(scram_state *state);
 static bool verify_client_proof(scram_state *state);
 static bool verify_final_nonce(scram_state *state);
-static void mock_scram_secret(const char *username, pg_cryptohash_type *hash_type,
+static void mock_scram_secret(const char *username, pg_cryptohash_type hash_type,
 							  int *iterations, int *key_length, char **salt,
 							  uint8 *stored_key, uint8 *server_key);
 static bool is_scram_printable(char *p);
@@ -217,6 +229,20 @@ scram_get_mechanisms(Port *port, StringInfo buf)
 	appendStringInfoChar(buf, '\0');
 }
 
+/* SCRAM-SM3 currently supports authentication without channel binding. */
+static void
+scram_sm3_get_mechanisms(Port *port, StringInfo buf)
+{
+#ifdef HAVE_EVP_SM3
+	appendStringInfoString(buf, SCRAM_SM3_NAME);
+	appendStringInfoChar(buf, '\0');
+#else
+	ereport(ERROR,
+			(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+			 errmsg("SCRAM-SM3 is not supported by this build")));
+#endif
+}
+
 /*
  * Initialize a new SCRAM authentication exchange status tracker.  This
  * needs to be called before doing any exchange.  It will be filled later
@@ -235,12 +261,26 @@ scram_get_mechanisms(Port *port, StringInfo buf)
 static void *
 scram_init(Port *port, const char *selected_mech, const char *shadow_pass)
 {
+	return scram_init_common(port, selected_mech, shadow_pass, PG_SHA256);
+}
+
+static void *
+scram_sm3_init(Port *port, const char *selected_mech, const char *shadow_pass)
+{
+	return scram_init_common(port, selected_mech, shadow_pass, PG_SM3);
+}
+
+static void *
+scram_init_common(Port *port, const char *selected_mech,
+				  const char *shadow_pass, pg_cryptohash_type hash_type)
+{
 	scram_state *state;
 	bool		got_secret;
 
 	state = (scram_state *) palloc0(sizeof(scram_state));
 	state->port = port;
 	state->state = SCRAM_AUTH_INIT;
+	state->hash_type = hash_type;
 
 	/*
 	 * Parse the selected mechanism.
@@ -251,11 +291,13 @@ scram_init(Port *port, const char *selected_mech, const char *shadow_pass)
 	 * violation like selecting any other SASL mechanism we don't support.
 	 */
 #ifdef USE_SSL
-	if (strcmp(selected_mech, SCRAM_SHA_256_PLUS_NAME) == 0 && port->ssl_in_use)
+	if (hash_type == PG_SHA256 &&
+		strcmp(selected_mech, SCRAM_SHA_256_PLUS_NAME) == 0 && port->ssl_in_use)
 		state->channel_binding_in_use = true;
 	else
 #endif
-	if (strcmp(selected_mech, SCRAM_SHA_256_NAME) == 0)
+	if ((hash_type == PG_SHA256 && strcmp(selected_mech, SCRAM_SHA_256_NAME) == 0) ||
+		(hash_type == PG_SM3 && strcmp(selected_mech, SCRAM_SM3_NAME) == 0))
 		state->channel_binding_in_use = false;
 	else
 		ereport(ERROR,
@@ -269,7 +311,8 @@ scram_init(Port *port, const char *selected_mech, const char *shadow_pass)
 	{
 		int			password_type = get_password_type(shadow_pass);
 
-		if (password_type == PASSWORD_TYPE_SCRAM_SHA_256)
+		if ((hash_type == PG_SHA256 && password_type == PASSWORD_TYPE_SCRAM_SHA_256) ||
+			(hash_type == PG_SM3 && password_type == PASSWORD_TYPE_SCRAM_SM3))
 		{
 			if (parse_scram_secret(shadow_pass, &state->iterations,
 								   &state->hash_type, &state->key_length,
@@ -318,7 +361,7 @@ scram_init(Port *port, const char *selected_mech, const char *shadow_pass)
 	 */
 	if (!got_secret)
 	{
-		mock_scram_secret(state->port->user_name, &state->hash_type,
+		mock_scram_secret(state->port->user_name, state->hash_type,
 						  &state->iterations, &state->key_length,
 						  &state->salt,
 						  state->StoredKey, state->ServerKey);
@@ -471,6 +514,23 @@ scram_exchange(void *opaq, const char *input, int inputlen,
 char *
 pg_be_scram_build_secret(const char *password)
 {
+	return build_scram_secret(password, PG_SHA256);
+}
+
+char *
+pg_be_scram_build_secret_sm3(const char *password)
+{
+#ifndef HAVE_EVP_SM3
+	ereport(ERROR,
+			(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+			 errmsg("SCRAM-SM3 is not supported by this build")));
+#endif
+	return build_scram_secret(password, PG_SM3);
+}
+
+static char *
+build_scram_secret(const char *password, pg_cryptohash_type hash_type)
+{
 	char	   *prep_password;
 	pg_saslprep_rc rc;
 	char		saltbuf[SCRAM_DEFAULT_SALT_LEN];
@@ -492,13 +552,17 @@ pg_be_scram_build_secret(const char *password)
 				(errcode(ERRCODE_INTERNAL_ERROR),
 				 errmsg("could not generate random salt")));
 
-	result = scram_build_secret(PG_SHA256, SCRAM_SHA_256_KEY_LEN,
+	result = scram_build_secret(hash_type,
+								hash_type == PG_SM3 ? SCRAM_SM3_KEY_LEN : SCRAM_SHA_256_KEY_LEN,
 								saltbuf, SCRAM_DEFAULT_SALT_LEN,
 								scram_sha_256_iterations, password,
 								&errstr);
 
 	if (prep_password)
 		pfree(prep_password);
+
+	if (!result)
+		elog(ERROR, "could not build SCRAM secret: %s", errstr);
 
 	return result;
 }
@@ -598,6 +662,7 @@ parse_scram_secret(const char *secret, int *iterations,
 	char	   *storedkey_str;
 	char	   *serverkey_str;
 	int			decoded_len;
+	long		parsed_iterations;
 	char	   *decoded_salt_buf;
 	char	   *decoded_stored_buf;
 	char	   *decoded_server_buf;
@@ -605,7 +670,7 @@ parse_scram_secret(const char *secret, int *iterations,
 	/*
 	 * The secret is of form:
 	 *
-	 * SCRAM-SHA-256$<iterations>:<salt>$<storedkey>:<serverkey>
+	 * <mechanism>$<iterations>:<salt>$<storedkey>:<serverkey>
 	 */
 	v = pstrdup(secret);
 	if ((scheme_str = strtok(v, "$")) == NULL)
@@ -620,15 +685,20 @@ parse_scram_secret(const char *secret, int *iterations,
 		goto invalid_secret;
 
 	/* Parse the fields */
-	if (strcmp(scheme_str, "SCRAM-SHA-256") != 0)
+	if (strcmp(scheme_str, SCRAM_SHA_256_NAME) == 0)
+		*hash_type = PG_SHA256;
+	else if (strcmp(scheme_str, SCRAM_SM3_NAME) == 0)
+		*hash_type = PG_SM3;
+	else
 		goto invalid_secret;
-	*hash_type = PG_SHA256;
-	*key_length = SCRAM_SHA_256_KEY_LEN;
+	*key_length = *hash_type == PG_SM3 ? SCRAM_SM3_KEY_LEN : SCRAM_SHA_256_KEY_LEN;
 
 	errno = 0;
-	*iterations = strtol(iterations_str, &p, 10);
-	if (*p || errno != 0)
+	parsed_iterations = strtol(iterations_str, &p, 10);
+	if (p == iterations_str || *p || errno != 0 ||
+		parsed_iterations <= 0 || parsed_iterations > INT_MAX)
 		goto invalid_secret;
+	*iterations = (int) parsed_iterations;
 
 	/*
 	 * Verify that the salt is in Base64-encoded format, by decoding it,
@@ -638,7 +708,7 @@ parse_scram_secret(const char *secret, int *iterations,
 	decoded_salt_buf = palloc(decoded_len);
 	decoded_len = pg_b64_decode(salt_str, strlen(salt_str),
 								decoded_salt_buf, decoded_len);
-	if (decoded_len < 0)
+	if (decoded_len <= 0)
 		goto invalid_secret;
 	*salt = pstrdup(salt_str);
 
@@ -673,14 +743,14 @@ invalid_secret:
  *
  * In a normal authentication, these are extracted from the secret
  * stored in the server.  This function generates values that look
- * realistic, for when there is no stored secret, using SCRAM-SHA-256.
+ * realistic for the selected mechanism when there is no stored secret.
  *
  * Like in parse_scram_secret(), for 'stored_key' and 'server_key', the
  * caller must pass pre-allocated buffers of size SCRAM_MAX_KEY_LEN, and
  * the buffer for the salt is palloc'd by this function.
  */
 static void
-mock_scram_secret(const char *username, pg_cryptohash_type *hash_type,
+mock_scram_secret(const char *username, pg_cryptohash_type hash_type,
 				  int *iterations, int *key_length, char **salt,
 				  uint8 *stored_key, uint8 *server_key)
 {
@@ -688,9 +758,8 @@ mock_scram_secret(const char *username, pg_cryptohash_type *hash_type,
 	char	   *encoded_salt;
 	int			encoded_len;
 
-	/* Enforce the use of SHA-256, which would be realistic enough */
-	*hash_type = PG_SHA256;
-	*key_length = SCRAM_SHA_256_KEY_LEN;
+	/* Use the mechanism selected by the HBA rule, including for unknown roles. */
+	*key_length = hash_type == PG_SM3 ? SCRAM_SM3_KEY_LEN : SCRAM_SHA_256_KEY_LEN;
 
 	/*
 	 * Generate deterministic salt.
@@ -700,7 +769,7 @@ mock_scram_secret(const char *username, pg_cryptohash_type *hash_type,
 	 * as the salt generated for mock authentication uses the cluster's nonce
 	 * value.
 	 */
-	raw_salt = scram_mock_salt(username, *hash_type, *key_length);
+	raw_salt = scram_mock_salt(username, hash_type, *key_length);
 	if (raw_salt == NULL)
 		elog(ERROR, "could not encode salt");
 
@@ -1004,7 +1073,7 @@ read_client_first_message(scram_state *state, const char *input)
 						 errdetail("The client selected SCRAM-SHA-256-PLUS, but the SCRAM message does not include channel binding data.")));
 
 #ifdef USE_SSL
-			if (state->port->ssl_in_use)
+			if (state->port->ssl_in_use && state->hash_type == PG_SHA256)
 				ereport(ERROR,
 						(errcode(ERRCODE_INVALID_AUTHORIZATION_SPECIFICATION),
 						 errmsg("SCRAM channel binding negotiation error"),
@@ -1030,7 +1099,7 @@ read_client_first_message(scram_state *state, const char *input)
 				ereport(ERROR,
 						(errcode(ERRCODE_PROTOCOL_VIOLATION),
 						 errmsg("malformed SCRAM message"),
-						 errdetail("The client selected SCRAM-SHA-256 without channel binding, but the SCRAM message includes channel binding data.")));
+						 errdetail("The client selected a SCRAM mechanism without channel binding, but the SCRAM message includes channel binding data.")));
 
 			channel_binding_type = read_attr_value(&p, 'p');
 
@@ -1470,12 +1539,13 @@ scram_mock_salt(const char *username, pg_cryptohash_type hash_type,
 	 */
 	StaticAssertDecl(PG_SHA256_DIGEST_LENGTH >= SCRAM_DEFAULT_SALT_LEN,
 					 "salt length greater than SHA256 digest length");
+	StaticAssertDecl(PG_SM3_DIGEST_LENGTH >= SCRAM_DEFAULT_SALT_LEN,
+					 "salt length greater than SM3 digest length");
 
 	/*
-	 * This may be worth refreshing if support for more hash methods is\
-	 * added.
+	 * Both supported mechanisms have digests large enough for the salt.
 	 */
-	Assert(hash_type == PG_SHA256);
+	Assert(hash_type == PG_SHA256 || hash_type == PG_SM3);
 
 	ctx = pg_cryptohash_create(hash_type);
 	if (pg_cryptohash_init(ctx) < 0 ||

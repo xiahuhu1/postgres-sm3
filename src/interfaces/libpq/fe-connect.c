@@ -623,6 +623,8 @@ pqDropServerData(PGconn *conn)
 	conn->last_sqlstate[0] = '\0';
 	conn->auth_req_received = false;
 	conn->client_finished_auth = false;
+	conn->sasl_sm3 = false;
+	conn->sasl_sm3_final_expected = false;
 	conn->password_needed = false;
 	conn->gssapi_used = false;
 	conn->write_failed = false;
@@ -1355,12 +1357,14 @@ pqConnectOptions2(PGconn *conn)
 		 */
 		conn->auth_required = true;
 		conn->allowed_auth_methods = 0;
+		conn->allowed_sasl_mechanisms = 0;
 
 		for (first = true, more = true; more; first = false)
 		{
 			char	   *method,
 					   *part;
 			uint32		bits;
+			uint32		sasl_bits = 0;
 
 			part = parse_comma_separated_list(&s, &more);
 			if (part == NULL)
@@ -1381,6 +1385,7 @@ pqConnectOptions2(PGconn *conn)
 					 */
 					conn->auth_required = false;
 					conn->allowed_auth_methods = -1;
+					conn->allowed_sasl_mechanisms = SASL_MECH_ALL;
 				}
 				else if (!negated)
 				{
@@ -1423,9 +1428,12 @@ pqConnectOptions2(PGconn *conn)
 				bits = (1 << AUTH_REQ_SSPI);
 				bits |= (1 << AUTH_REQ_GSS_CONT);
 			}
-			else if (strcmp(method, "scram-sha-256") == 0)
+			else if (strcmp(method, "scram-sha-256") == 0 ||
+					 strcmp(method, "scram-sm3") == 0)
 			{
-				/* This currently assumes that SCRAM is the only SASL method. */
+				/* AUTH_REQ_SASL is shared; restrict the family separately. */
+				sasl_bits = strcmp(method, "scram-sm3") == 0 ?
+					SASL_MECH_SCRAM_SM3 : SASL_MECH_SCRAM_SHA_256;
 				bits = (1 << AUTH_REQ_SASL);
 				bits |= (1 << AUTH_REQ_SASL_CONT);
 				bits |= (1 << AUTH_REQ_SASL_FIN);
@@ -1465,8 +1473,28 @@ pqConnectOptions2(PGconn *conn)
 				return false;
 			}
 
-			/* Update the bitmask. */
-			if (negated)
+			/* Update the family policy before its shared AuthRequest bits. */
+			if (sasl_bits)
+			{
+				if (negated)
+				{
+					if ((conn->allowed_sasl_mechanisms & sasl_bits) == 0)
+						goto duplicate;
+					conn->allowed_sasl_mechanisms &= ~sasl_bits;
+				}
+				else
+				{
+					if ((conn->allowed_sasl_mechanisms & sasl_bits) == sasl_bits)
+						goto duplicate;
+					conn->allowed_sasl_mechanisms |= sasl_bits;
+				}
+
+				if (conn->allowed_sasl_mechanisms)
+					conn->allowed_auth_methods |= bits;
+				else
+					conn->allowed_auth_methods &= ~bits;
+			}
+			else if (negated)
 			{
 				if ((conn->allowed_auth_methods & bits) == 0)
 					goto duplicate;

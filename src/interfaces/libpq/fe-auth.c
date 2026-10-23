@@ -427,6 +427,7 @@ pg_SASL_init(PGconn *conn, int payloadlen)
 	PQExpBufferData mechanism_buf;
 	char	   *password = NULL;
 	SASLStatus	status;
+	int			endpos = conn->inCursor + payloadlen;
 
 	initPQExpBuffer(&mechanism_buf);
 
@@ -451,7 +452,7 @@ pg_SASL_init(PGconn *conn, int payloadlen)
 	selected_mechanism = NULL;
 	for (;;)
 	{
-		if (pqGets(&mechanism_buf, conn))
+		if (pqGets(&mechanism_buf, conn) || conn->inCursor > endpos)
 		{
 			appendPQExpBufferStr(&conn->errorMessage,
 								 "fe_sendauth: invalid authentication request from server: invalid list of authentication mechanisms\n");
@@ -464,12 +465,27 @@ pg_SASL_init(PGconn *conn, int payloadlen)
 		if (mechanism_buf.data[0] == '\0')
 			break;
 
+		/* Enforce require_auth for the actual SASL family, not just code 10. */
+		if (conn->require_auth && conn->require_auth[0])
+		{
+			uint32		family = 0;
+
+			if (strcmp(mechanism_buf.data, SCRAM_SHA_256_NAME) == 0 ||
+				strcmp(mechanism_buf.data, SCRAM_SHA_256_PLUS_NAME) == 0)
+				family = SASL_MECH_SCRAM_SHA_256;
+			else if (strcmp(mechanism_buf.data, SCRAM_SM3_NAME) == 0)
+				family = SASL_MECH_SCRAM_SM3;
+
+			if (family && !(conn->allowed_sasl_mechanisms & family))
+				continue;
+		}
+
 		/*
 		 * Select the mechanism to use.  Pick SCRAM-SHA-256-PLUS over anything
 		 * else if a channel binding type is set and if the client supports it
 		 * (and did not set channel_binding=disable). Pick SCRAM-SHA-256 if
-		 * nothing else has already been picked.  If we add more mechanisms, a
-		 * more refined priority mechanism might become necessary.
+		 * nothing else has already been picked. Ordinary SCRAM-SM3 also
+		 * follows the server's preference order, subject to require_auth.
 		 */
 		if (strcmp(mechanism_buf.data, SCRAM_SHA_256_PLUS_NAME) == 0)
 		{
@@ -524,11 +540,30 @@ pg_SASL_init(PGconn *conn, int payloadlen)
 			conn->sasl = &pg_scram_mech;
 			conn->password_needed = true;
 		}
+#ifdef HAVE_EVP_SM3
+		else if (strcmp(mechanism_buf.data, SCRAM_SM3_NAME) == 0 &&
+				 !selected_mechanism)
+		{
+			selected_mechanism = SCRAM_SM3_NAME;
+			conn->sasl = &pg_scram_mech;
+			conn->password_needed = true;
+		}
+#endif
+	}
+
+	if (conn->inCursor != endpos)
+	{
+		libpq_append_conn_error(conn, "invalid list of SASL authentication mechanisms");
+		goto error;
 	}
 
 	if (!selected_mechanism)
 	{
-		libpq_append_conn_error(conn, "none of the server's SASL authentication mechanisms are supported");
+		if (conn->require_auth && conn->require_auth[0])
+			libpq_append_conn_error(conn, "authentication method requirement \"%s\" failed: server requested SASL authentication (server did not offer an allowed SASL mechanism)",
+									conn->require_auth);
+		else
+			libpq_append_conn_error(conn, "none of the server's SASL authentication mechanisms are supported");
 		goto error;
 	}
 
@@ -538,6 +573,9 @@ pg_SASL_init(PGconn *conn, int payloadlen)
 		libpq_append_conn_error(conn, "channel binding is required, but server did not offer an authentication method that supports channel binding");
 		goto error;
 	}
+	conn->sasl_sm3 = strcmp(selected_mechanism, SCRAM_SM3_NAME) == 0;
+	if (conn->sasl_sm3)
+		conn->client_finished_auth = false;
 
 	/*
 	 * Now that the SASL mechanism has been chosen for the exchange,
@@ -633,6 +671,13 @@ pg_SASL_continue(PGconn *conn, int payloadlen, bool final)
 	char	   *challenge;
 	SASLStatus	status;
 
+	if (conn->sasl_sm3 &&
+		(conn->client_finished_auth || final != conn->sasl_sm3_final_expected))
+	{
+		libpq_append_conn_error(conn, "unexpected message in SCRAM-SM3 authentication");
+		return STATUS_ERROR;
+	}
+
 	/* Read the SASL challenge from the AuthenticationSASLContinue message. */
 	challenge = malloc(payloadlen + 1);
 	if (!challenge)
@@ -692,6 +737,16 @@ pg_SASL_continue(PGconn *conn, int payloadlen, bool final)
 
 	if (status == SASL_FAILED)
 		return STATUS_ERROR;
+	if (conn->sasl_sm3)
+	{
+		if ((!final && status != SASL_CONTINUE) ||
+			(final && status != SASL_COMPLETE))
+		{
+			libpq_append_conn_error(conn, "invalid SCRAM-SM3 authentication state");
+			return STATUS_ERROR;
+		}
+		conn->sasl_sm3_final_expected = true;
+	}
 
 	return STATUS_OK;
 }
@@ -806,6 +861,22 @@ check_expected_areq(AuthRequest areq, PGconn *conn)
 
 	StaticAssertDecl((sizeof(conn->allowed_auth_methods) * CHAR_BIT) > AUTH_REQ_MAX,
 					 "AUTH_REQ_MAX overflows the allowed_auth_methods bitmask");
+
+	/* SM3 always requires a verified server-final, even without require_auth. */
+	if (conn->sasl_sm3)
+	{
+		if (areq == AUTH_REQ_OK && !conn->client_finished_auth)
+		{
+			libpq_append_conn_error(conn, "server did not complete SCRAM-SM3 authentication");
+			return false;
+		}
+		if (areq != AUTH_REQ_OK && areq != AUTH_REQ_SASL_CONT &&
+			areq != AUTH_REQ_SASL_FIN)
+		{
+			libpq_append_conn_error(conn, "unexpected authentication request during SCRAM-SM3 authentication");
+			return false;
+		}
+	}
 
 	if (conn->sslcertmode[0] == 'r' /* require */
 		&& areq == AUTH_REQ_OK)
@@ -1342,6 +1413,17 @@ PQencryptPasswordConn(PGconn *conn, const char *passwd, const char *user,
 		crypt_pwd = pg_fe_scram_build_secret(passwd,
 											 conn->scram_sha_256_iterations,
 											 &errstr);
+		if (!crypt_pwd)
+			libpq_append_conn_error(conn, "could not encrypt password: %s", errstr);
+	}
+	else if (strcmp(algorithm, "scram-sm3") == 0)
+	{
+		const char *errstr = NULL;
+
+		/* scram_iterations is shared by both SCRAM families on the server. */
+		crypt_pwd = pg_fe_scram_build_secret_sm3(passwd,
+												 conn->scram_sha_256_iterations,
+												 &errstr);
 		if (!crypt_pwd)
 			libpq_append_conn_error(conn, "could not encrypt password: %s", errstr);
 	}

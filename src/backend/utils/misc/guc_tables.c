@@ -415,6 +415,9 @@ static const struct config_enum_entry plan_cache_mode_options[] = {
 static const struct config_enum_entry password_encryption_options[] = {
 	{"md5", PASSWORD_TYPE_MD5, false},
 	{"scram-sha-256", PASSWORD_TYPE_SCRAM_SHA_256, false},
+#ifdef HAVE_EVP_SM3
+	{"scram-sm3", PASSWORD_TYPE_SCRAM_SM3, false},
+#endif
 	{NULL, 0, false}
 };
 

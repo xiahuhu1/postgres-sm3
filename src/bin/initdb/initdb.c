@@ -95,6 +95,9 @@ typedef struct _stringlist
 
 static const char *const auth_methods_host[] = {
 	"trust", "reject", "scram-sha-256", "md5", "password", "ident", "radius",
+#ifdef HAVE_EVP_SM3
+	"scram-sm3",
+#endif
 #ifdef ENABLE_GSS
 	"gss",
 #endif
@@ -117,6 +120,9 @@ static const char *const auth_methods_host[] = {
 };
 static const char *const auth_methods_local[] = {
 	"trust", "reject", "scram-sha-256", "md5", "password", "peer", "radius",
+#ifdef HAVE_EVP_SM3
+	"scram-sm3",
+#endif
 #ifdef USE_PAM
 	"pam",
 #endif
@@ -1381,6 +1387,11 @@ setup_config(void)
 								  "off", true);
 #endif
 
+	if (strcmp(authmethodlocal, "scram-sm3") == 0 ||
+		strcmp(authmethodhost, "scram-sm3") == 0)
+		conflines = replace_guc_value(conflines, "password_encryption",
+									  "scram-sm3", false);
+
 	/*
 	 * Change password_encryption setting to md5 if md5 was chosen as an
 	 * authentication method, unless scram-sha-256 was also chosen.
@@ -1626,6 +1637,10 @@ setup_auth(FILE *cmdfd)
 	 * passwords are not publicly visible.
 	 */
 	PG_CMD_PUTS("REVOKE ALL ON pg_authid FROM public;\n\n");
+
+	if (strcmp(authmethodlocal, "scram-sm3") == 0 ||
+		strcmp(authmethodhost, "scram-sm3") == 0)
+		PG_CMD_PUTS("SET password_encryption = 'scram-sm3';\n");
 
 	if (superuser_password)
 		PG_CMD_PRINTF("ALTER USER \"%s\" WITH PASSWORD E'%s';\n\n",
@@ -2576,10 +2591,12 @@ check_need_password(const char *authmethodlocal, const char *authmethodhost)
 {
 	if ((strcmp(authmethodlocal, "md5") == 0 ||
 		 strcmp(authmethodlocal, "password") == 0 ||
-		 strcmp(authmethodlocal, "scram-sha-256") == 0) &&
+		 strcmp(authmethodlocal, "scram-sha-256") == 0 ||
+		 strcmp(authmethodlocal, "scram-sm3") == 0) &&
 		(strcmp(authmethodhost, "md5") == 0 ||
 		 strcmp(authmethodhost, "password") == 0 ||
-		 strcmp(authmethodhost, "scram-sha-256") == 0) &&
+		 strcmp(authmethodhost, "scram-sha-256") == 0 ||
+		 strcmp(authmethodhost, "scram-sm3") == 0) &&
 		!(pwprompt || pwfilename))
 		pg_fatal("must specify a password for the superuser to enable password authentication");
 }
@@ -3436,6 +3453,15 @@ main(int argc, char *argv[])
 
 	check_authmethod_valid(authmethodlocal, auth_methods_local, "local");
 	check_authmethod_valid(authmethodhost, auth_methods_host, "host");
+
+	/* One role has one verifier, so these authentication families cannot mix. */
+	if ((strcmp(authmethodlocal, "scram-sm3") == 0 &&
+		 (strcmp(authmethodhost, "md5") == 0 ||
+		  strcmp(authmethodhost, "scram-sha-256") == 0)) ||
+		(strcmp(authmethodhost, "scram-sm3") == 0 &&
+		 (strcmp(authmethodlocal, "md5") == 0 ||
+		  strcmp(authmethodlocal, "scram-sha-256") == 0)))
+		pg_fatal("scram-sm3 cannot be combined with md5 or scram-sha-256 authentication during initialization");
 
 	check_need_password(authmethodlocal, authmethodhost);
 

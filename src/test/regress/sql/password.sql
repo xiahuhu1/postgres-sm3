@@ -3,8 +3,11 @@
 --
 
 -- Tests for GUC password_encryption
+-- The available-values hint depends on OpenSSL SM3 availability.
+\set VERBOSITY terse
 SET password_encryption = 'novalue'; -- error
 SET password_encryption = true; -- error
+\set VERBOSITY default
 SET password_encryption = 'md5'; -- ok
 SET password_encryption = 'scram-sha-256'; -- ok
 

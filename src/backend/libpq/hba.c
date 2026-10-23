@@ -114,7 +114,8 @@ static const char *const UserAuthName[] =
 	"ldap",
 	"cert",
 	"radius",
-	"peer"
+	"peer",
+	"scram-sm3"
 };
 
 /*
@@ -1717,6 +1718,12 @@ parse_hba_line(TokenizedAuthLine *tok_line, int elevel)
 		parsedline->auth_method = uaMD5;
 	else if (strcmp(token->string, "scram-sha-256") == 0)
 		parsedline->auth_method = uaSCRAM;
+	else if (strcmp(token->string, "scram-sm3") == 0)
+#ifdef HAVE_EVP_SM3
+		parsedline->auth_method = uaSCRAMSM3;
+#else
+		unsupauth = "scram-sm3";
+#endif
 	else if (strcmp(token->string, "pam") == 0)
 #ifdef USE_PAM
 		parsedline->auth_method = uaPAM;

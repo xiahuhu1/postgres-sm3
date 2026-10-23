@@ -1411,6 +1411,7 @@ if sslopt in ['auto', 'openssl']
       # Function introduced in OpenSSL 1.1.1
       ['X509_get_signature_info'],
       ['SSL_CTX_set_num_tickets'],
+      ['EVP_sm3'],
     ]
 
     are_openssl_funcs_complete = true

@@ -24,7 +24,10 @@ typedef enum
 	PG_SHA256,
 	PG_SHA384,
 	PG_SHA512,
+	PG_SM3,
 } pg_cryptohash_type;
+
+#define PG_SM3_DIGEST_LENGTH 32
 
 /* opaque context, private to each cryptohash implementation */
 typedef struct pg_cryptohash_ctx pg_cryptohash_ctx;

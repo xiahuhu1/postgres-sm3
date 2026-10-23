@@ -19,8 +19,8 @@
  * Types of password hashes or secrets.
  *
  * Plaintext passwords can be passed in by the user, in a CREATE/ALTER USER
- * command. They will be encrypted to MD5 or SCRAM-SHA-256 format, before
- * storing on-disk, so only MD5 and SCRAM-SHA-256 passwords should appear
+ * command. They will be encrypted to MD5, SCRAM-SHA-256 or SCRAM-SM3 format before
+ * storing on-disk, so only passwords in those formats should appear
  * in pg_authid.rolpassword. They are also the allowed values for the
  * password_encryption GUC.
  */
@@ -29,6 +29,7 @@ typedef enum PasswordType
 	PASSWORD_TYPE_PLAINTEXT = 0,
 	PASSWORD_TYPE_MD5,
 	PASSWORD_TYPE_SCRAM_SHA_256,
+	PASSWORD_TYPE_SCRAM_SM3,
 } PasswordType;
 
 extern PasswordType get_password_type(const char *shadow_pass);

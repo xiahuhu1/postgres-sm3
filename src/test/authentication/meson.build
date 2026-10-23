@@ -12,6 +12,7 @@ tests += {
       't/004_file_inclusion.pl',
       't/005_sspi.pl',
       't/006_login_trigger.pl',
+      't/007_scram_sm3.pl',
     ],
   },
 }

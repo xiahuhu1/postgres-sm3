@@ -58,6 +58,7 @@ typedef enum pg_hmac_errno
 	PG_HMAC_ERROR_NONE = 0,
 	PG_HMAC_ERROR_DEST_LEN,
 	PG_HMAC_ERROR_OPENSSL,
+	PG_HMAC_ERROR_UNSUPPORTED,
 } pg_hmac_errno;
 
 /* Internal pg_hmac_ctx structure */
@@ -207,6 +208,14 @@ pg_hmac_init(pg_hmac_ctx *ctx, const uint8 *key, size_t len)
 		case PG_SHA512:
 			status = HMAC_Init_ex(ctx->hmacctx, key, len, EVP_sha512(), NULL);
 			break;
+		case PG_SM3:
+#ifdef HAVE_EVP_SM3
+			status = HMAC_Init_ex(ctx->hmacctx, key, len, EVP_sm3(), NULL);
+			break;
+#else
+			ctx->error = PG_HMAC_ERROR_UNSUPPORTED;
+			return -1;
+#endif
 	}
 
 	/* OpenSSL internals return 1 on success, 0 on failure */
@@ -231,6 +240,8 @@ pg_hmac_update(pg_hmac_ctx *ctx, const uint8 *data, size_t len)
 	int			status = 0;
 
 	if (ctx == NULL)
+		return -1;
+	if (ctx->error == PG_HMAC_ERROR_UNSUPPORTED)
 		return -1;
 
 	status = HMAC_Update(ctx->hmacctx, data, len);
@@ -257,6 +268,8 @@ pg_hmac_final(pg_hmac_ctx *ctx, uint8 *dest, size_t len)
 	uint32		outlen;
 
 	if (ctx == NULL)
+		return -1;
+	if (ctx->error == PG_HMAC_ERROR_UNSUPPORTED)
 		return -1;
 
 	switch (ctx->type)
@@ -298,6 +311,13 @@ pg_hmac_final(pg_hmac_ctx *ctx, uint8 *dest, size_t len)
 			break;
 		case PG_SHA512:
 			if (len < PG_SHA512_DIGEST_LENGTH)
+			{
+				ctx->error = PG_HMAC_ERROR_DEST_LEN;
+				return -1;
+			}
+			break;
+		case PG_SM3:
+			if (len < PG_SM3_DIGEST_LENGTH)
 			{
 				ctx->error = PG_HMAC_ERROR_DEST_LEN;
 				return -1;
@@ -371,6 +391,8 @@ pg_hmac_error(pg_hmac_ctx *ctx)
 			return _("destination buffer too small");
 		case PG_HMAC_ERROR_OPENSSL:
 			return _("OpenSSL failure");
+		case PG_HMAC_ERROR_UNSUPPORTED:
+			return _("SM3 is not supported by this build");
 	}
 
 	Assert(false);				/* cannot be reached */

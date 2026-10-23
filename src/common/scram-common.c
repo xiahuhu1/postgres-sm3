@@ -215,14 +215,28 @@ scram_build_secret(pg_cryptohash_type hash_type, int key_length,
 	uint8		server_key[SCRAM_MAX_KEY_LEN];
 	char	   *result;
 	char	   *p;
+	const char *mechanism;
 	int			maxlen;
 	int			encoded_salt_len;
 	int			encoded_stored_len;
 	int			encoded_server_len;
 	int			encoded_result;
 
-	/* Only this hash method is supported currently */
-	Assert(hash_type == PG_SHA256);
+	if (hash_type == PG_SM3)
+		mechanism = SCRAM_SM3_NAME;
+	else if (hash_type == PG_SHA256)
+		mechanism = SCRAM_SHA_256_NAME;
+	else
+	{
+		*errstr = _("unsupported SCRAM hash algorithm");
+#ifdef FRONTEND
+		return NULL;
+#else
+		elog(ERROR, "%s", *errstr);
+#endif
+	}
+
+	Assert(key_length == SCRAM_SHA_256_KEY_LEN);
 
 	Assert(iterations > 0);
 
@@ -248,14 +262,14 @@ scram_build_secret(pg_cryptohash_type hash_type, int key_length,
 
 	/*----------
 	 * The format is:
-	 * SCRAM-SHA-256$<iteration count>:<salt>$<StoredKey>:<ServerKey>
+	 * <mechanism>$<iteration count>:<salt>$<StoredKey>:<ServerKey>
 	 *----------
 	 */
 	encoded_salt_len = pg_b64_enc_len(saltlen);
 	encoded_stored_len = pg_b64_enc_len(key_length);
 	encoded_server_len = pg_b64_enc_len(key_length);
 
-	maxlen = strlen("SCRAM-SHA-256") + 1
+	maxlen = strlen(mechanism) + 1
 		+ 10 + 1				/* iteration count */
 		+ encoded_salt_len + 1	/* Base64-encoded salt */
 		+ encoded_stored_len + 1	/* Base64-encoded StoredKey */
@@ -272,7 +286,7 @@ scram_build_secret(pg_cryptohash_type hash_type, int key_length,
 	result = palloc(maxlen);
 #endif
 
-	p = result + sprintf(result, "SCRAM-SHA-256$%d:", iterations);
+	p = result + sprintf(result, "%s$%d:", mechanism, iterations);
 
 	/* salt */
 	encoded_result = pg_b64_encode(salt, saltlen, p, encoded_salt_len);

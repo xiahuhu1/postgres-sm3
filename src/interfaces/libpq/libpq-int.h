@@ -88,6 +88,11 @@ typedef struct
  */
 #define CMDSTATUS_LEN 64		/* should match COMPLETION_TAG_BUFSIZE */
 
+/* require_auth distinguishes SASL families sharing AUTH_REQ_SASL. */
+#define SASL_MECH_SCRAM_SHA_256 (1U << 0)
+#define SASL_MECH_SCRAM_SM3 (1U << 1)
+#define SASL_MECH_ALL (SASL_MECH_SCRAM_SHA_256 | SASL_MECH_SCRAM_SM3)
+
 /*
  * PGresult and the subsidiary types PGresAttDesc, PGresAttValue
  * represent the result of a query (or more precisely, of a single SQL
@@ -489,8 +494,12 @@ struct pg_conn
 								 * the server? */
 	uint32		allowed_auth_methods;	/* bitmask of acceptable AuthRequest
 										 * codes */
+	uint32		allowed_sasl_mechanisms; /* acceptable SASL mechanism families;
+										 * connection policy, kept across reset */
 	bool		client_finished_auth;	/* have we finished our half of the
 										 * authentication exchange? */
+	bool		sasl_sm3;		/* ordinary SCRAM-SM3 exchange has started */
+	bool		sasl_sm3_final_expected; /* next SM3 message must be SASLFinal */
 
 
 	/* Transient state needed while establishing connection */
