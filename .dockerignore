@@ -1,0 +1,6 @@
+.git
+**/tmp_check*
+**/regression.diffs
+**/regression.out
+.env
+**/.env

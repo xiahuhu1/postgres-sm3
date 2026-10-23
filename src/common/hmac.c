@@ -44,6 +44,7 @@ typedef enum pg_hmac_errno
 	PG_HMAC_ERROR_NONE = 0,
 	PG_HMAC_ERROR_OOM,
 	PG_HMAC_ERROR_INTERNAL,
+	PG_HMAC_ERROR_UNSUPPORTED,
 } pg_hmac_errno;
 
 /* Internal pg_hmac_ctx structure */
@@ -116,6 +117,9 @@ pg_hmac_create(pg_cryptohash_type type)
 			ctx->digest_size = PG_SHA512_DIGEST_LENGTH;
 			ctx->block_size = PG_SHA512_BLOCK_LENGTH;
 			break;
+		case PG_SM3:
+			ctx->error = PG_HMAC_ERROR_UNSUPPORTED;
+			return ctx;
 	}
 
 	ctx->hash = pg_cryptohash_create(type);
@@ -143,6 +147,8 @@ pg_hmac_init(pg_hmac_ctx *ctx, const uint8 *key, size_t len)
 	uint8	   *shrinkbuf = NULL;
 
 	if (ctx == NULL)
+		return -1;
+	if (ctx->error == PG_HMAC_ERROR_UNSUPPORTED)
 		return -1;
 
 	digest_size = ctx->digest_size;
@@ -224,6 +230,8 @@ pg_hmac_update(pg_hmac_ctx *ctx, const uint8 *data, size_t len)
 {
 	if (ctx == NULL)
 		return -1;
+	if (ctx->error == PG_HMAC_ERROR_UNSUPPORTED)
+		return -1;
 
 	if (pg_cryptohash_update(ctx->hash, data, len) < 0)
 	{
@@ -246,6 +254,8 @@ pg_hmac_final(pg_hmac_ctx *ctx, uint8 *dest, size_t len)
 	uint8	   *h;
 
 	if (ctx == NULL)
+		return -1;
+	if (ctx->error == PG_HMAC_ERROR_UNSUPPORTED)
 		return -1;
 
 	h = ALLOC(ctx->digest_size);
@@ -323,6 +333,8 @@ pg_hmac_error(pg_hmac_ctx *ctx)
 			return _("internal error");
 		case PG_HMAC_ERROR_OOM:
 			return _("out of memory");
+		case PG_HMAC_ERROR_UNSUPPORTED:
+			return _("SM3 is not supported by this build");
 	}
 
 	Assert(false);				/* cannot be reached */

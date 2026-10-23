@@ -288,6 +288,7 @@ auth_failed(Port *port, int status, const char *logdetail)
 		case uaPassword:
 		case uaMD5:
 		case uaSCRAM:
+		case uaSCRAMSM3:
 			errstr = gettext_noop("password authentication failed for user \"%s\"");
 			/* We use it to indicate if a .pgpass password failed. */
 			errcode_return = ERRCODE_INVALID_PASSWORD;
@@ -597,6 +598,7 @@ ClientAuthentication(Port *port)
 
 		case uaMD5:
 		case uaSCRAM:
+		case uaSCRAMSM3:
 			status = CheckPWChallengeAuth(port, &logdetail);
 			break;
 
@@ -834,6 +836,7 @@ CheckPWChallengeAuth(Port *port, const char **logdetail)
 	PasswordType pwtype;
 
 	Assert(port->hba->auth_method == uaSCRAM ||
+		   port->hba->auth_method == uaSCRAMSM3 ||
 		   port->hba->auth_method == uaMD5);
 
 	/* First look up the user's password. */
@@ -863,7 +866,10 @@ CheckPWChallengeAuth(Port *port, const char **logdetail)
 	 * had an MD5 password, CheckSASLAuth() with the SCRAM mechanism will
 	 * fail.
 	 */
-	if (port->hba->auth_method == uaMD5 && pwtype == PASSWORD_TYPE_MD5)
+	if (port->hba->auth_method == uaSCRAMSM3)
+		auth_result = CheckSASLAuth(&pg_be_scram_sm3_mech, port, shadow_pass,
+									logdetail);
+	else if (port->hba->auth_method == uaMD5 && pwtype == PASSWORD_TYPE_MD5)
 		auth_result = CheckMD5Auth(port, shadow_pass, logdetail);
 	else
 		auth_result = CheckSASLAuth(&pg_be_scram_mech, port, shadow_pass,

@@ -45,6 +45,7 @@ typedef enum pg_cryptohash_errno
 {
 	PG_CRYPTOHASH_ERROR_NONE = 0,
 	PG_CRYPTOHASH_ERROR_DEST_LEN,
+	PG_CRYPTOHASH_ERROR_UNSUPPORTED,
 } pg_cryptohash_errno;
 
 /* Internal pg_cryptohash_ctx structure */
@@ -122,6 +123,9 @@ pg_cryptohash_init(pg_cryptohash_ctx *ctx)
 		case PG_SHA512:
 			pg_sha512_init(&ctx->data.sha512);
 			break;
+		case PG_SM3:
+			ctx->error = PG_CRYPTOHASH_ERROR_UNSUPPORTED;
+			return -1;
 	}
 
 	return 0;
@@ -158,6 +162,9 @@ pg_cryptohash_update(pg_cryptohash_ctx *ctx, const uint8 *data, size_t len)
 		case PG_SHA512:
 			pg_sha512_update(&ctx->data.sha512, data, len);
 			break;
+		case PG_SM3:
+			ctx->error = PG_CRYPTOHASH_ERROR_UNSUPPORTED;
+			return -1;
 	}
 
 	return 0;
@@ -224,6 +231,9 @@ pg_cryptohash_final(pg_cryptohash_ctx *ctx, uint8 *dest, size_t len)
 			}
 			pg_sha512_final(&ctx->data.sha512, dest);
 			break;
+		case PG_SM3:
+			ctx->error = PG_CRYPTOHASH_ERROR_UNSUPPORTED;
+			return -1;
 	}
 
 	return 0;
@@ -266,6 +276,8 @@ pg_cryptohash_error(pg_cryptohash_ctx *ctx)
 			return _("success");
 		case PG_CRYPTOHASH_ERROR_DEST_LEN:
 			return _("destination buffer too small");
+		case PG_CRYPTOHASH_ERROR_UNSUPPORTED:
+			return _("SM3 is not supported by this build");
 	}
 
 	Assert(false);

@@ -16,16 +16,18 @@
 #include "common/cryptohash.h"
 #include "common/sha2.h"
 
-/* Name of SCRAM mechanisms per IANA */
+/* Names of SCRAM mechanisms. */
 #define SCRAM_SHA_256_NAME "SCRAM-SHA-256"
 #define SCRAM_SHA_256_PLUS_NAME "SCRAM-SHA-256-PLUS"	/* with channel binding */
+#define SCRAM_SM3_NAME "SCRAM-SM3"
 
 /* Length of SCRAM keys (client and server) */
 #define SCRAM_SHA_256_KEY_LEN				PG_SHA256_DIGEST_LENGTH
+#define SCRAM_SM3_KEY_LEN					PG_SM3_DIGEST_LENGTH
 
 /*
  * Size of buffers used internally by SCRAM routines, that should be the
- * maximum of SCRAM_SHA_*_KEY_LEN among the hash methods supported.
+ * maximum of SCRAM_*_KEY_LEN among the hash methods supported.
  */
 #define SCRAM_MAX_KEY_LEN					SCRAM_SHA_256_KEY_LEN
 
@@ -48,6 +50,7 @@
  * 4096 per RFC 7677.
  */
 #define SCRAM_SHA_256_DEFAULT_ITERATIONS	4096
+#define SCRAM_SM3_DEFAULT_ITERATIONS		4096
 
 extern int	scram_SaltedPassword(const char *password,
 								 pg_cryptohash_type hash_type, int key_length,

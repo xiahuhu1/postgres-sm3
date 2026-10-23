@@ -14,6 +14,8 @@
 
 #include "postgres_fe.h"
 
+#include <limits.h>
+
 #include "common/base64.h"
 #include "common/hmac.h"
 #include "common/saslprep.h"
@@ -111,6 +113,11 @@ scram_init(PGconn *conn,
 	state->state = FE_SCRAM_INIT;
 	state->key_length = SCRAM_SHA_256_KEY_LEN;
 	state->hash_type = PG_SHA256;
+	if (strcmp(sasl_mechanism, SCRAM_SM3_NAME) == 0)
+	{
+		state->key_length = SCRAM_SM3_KEY_LEN;
+		state->hash_type = PG_SM3;
+	}
 
 	state->sasl_mechanism = strdup(sasl_mechanism);
 	if (!state->sasl_mechanism)
@@ -396,7 +403,8 @@ build_client_first_message(fe_scram_state *state)
 		appendPQExpBufferStr(&buf, "p=tls-server-end-point");
 	}
 #ifdef USE_SSL
-	else if (conn->channel_binding[0] != 'd' && /* disable */
+	else if (state->hash_type == PG_SHA256 &&
+			 conn->channel_binding[0] != 'd' && /* disable */
 			 conn->ssl_in_use)
 	{
 		/*
@@ -537,7 +545,8 @@ build_client_final_message(fe_scram_state *state)
 #endif							/* USE_SSL */
 	}
 #ifdef USE_SSL
-	else if (conn->channel_binding[0] != 'd' && /* disable */
+	else if (state->hash_type == PG_SHA256 &&
+			 conn->channel_binding[0] != 'd' && /* disable */
 			 conn->ssl_in_use)
 		appendPQExpBufferStr(&buf, "c=eSws");	/* base64 of "y,," */
 #endif
@@ -607,6 +616,7 @@ read_server_first_message(fe_scram_state *state, char *input)
 	char	   *encoded_salt;
 	char	   *nonce;
 	int			decoded_salt_len;
+	long		iterations;
 
 	state->server_first_message = strdup(input);
 	if (state->server_first_message == NULL)
@@ -646,6 +656,11 @@ read_server_first_message(fe_scram_state *state, char *input)
 		return false;
 	}
 	decoded_salt_len = pg_b64_dec_len(strlen(encoded_salt));
+	if (state->hash_type == PG_SM3 && decoded_salt_len == 0)
+	{
+		libpq_append_conn_error(conn, "malformed SCRAM message (invalid salt)");
+		return false;
+	}
 	state->salt = malloc(decoded_salt_len);
 	if (state->salt == NULL)
 	{
@@ -656,7 +671,8 @@ read_server_first_message(fe_scram_state *state, char *input)
 								   strlen(encoded_salt),
 								   state->salt,
 								   decoded_salt_len);
-	if (state->saltlen < 0)
+	if (state->saltlen < 0 ||
+		(state->hash_type == PG_SM3 && state->saltlen == 0))
 	{
 		libpq_append_conn_error(conn, "malformed SCRAM message (invalid salt)");
 		return false;
@@ -668,15 +684,22 @@ read_server_first_message(fe_scram_state *state, char *input)
 		/* read_attr_value() has appended an error string */
 		return false;
 	}
-	state->iterations = strtol(iterations_str, &endptr, 10);
-	if (*endptr != '\0' || state->iterations < 1)
+	errno = 0;
+	iterations = strtol(iterations_str, &endptr, 10);
+	if (iterations_str[0] < '1' || iterations_str[0] > '9' ||
+		*endptr != '\0' || errno == ERANGE || iterations < 1 ||
+		iterations > INT_MAX)
 	{
 		libpq_append_conn_error(conn, "malformed SCRAM message (invalid iteration count)");
 		return false;
 	}
+	state->iterations = (int) iterations;
 
 	if (*input != '\0')
+	{
 		libpq_append_conn_error(conn, "malformed SCRAM message (garbage at end of server-first-message)");
+		return false;
+	}
 
 	return true;
 }
@@ -888,8 +911,9 @@ verify_server_signature(fe_scram_state *state, bool *match,
  * On error, returns NULL and sets *errstr to point to a message about the
  * error details.
  */
-char *
-pg_fe_scram_build_secret(const char *password, int iterations, const char **errstr)
+static char *
+scram_build_secret_fe(const char *password, pg_cryptohash_type hash_type,
+					  int key_length, int iterations, const char **errstr)
 {
 	char	   *prep_password;
 	pg_saslprep_rc rc;
@@ -919,7 +943,7 @@ pg_fe_scram_build_secret(const char *password, int iterations, const char **errs
 		return NULL;
 	}
 
-	result = scram_build_secret(PG_SHA256, SCRAM_SHA_256_KEY_LEN, saltbuf,
+	result = scram_build_secret(hash_type, key_length, saltbuf,
 								SCRAM_DEFAULT_SALT_LEN,
 								iterations, password,
 								errstr);
@@ -927,4 +951,18 @@ pg_fe_scram_build_secret(const char *password, int iterations, const char **errs
 	free(prep_password);
 
 	return result;
+}
+
+char *
+pg_fe_scram_build_secret(const char *password, int iterations, const char **errstr)
+{
+	return scram_build_secret_fe(password, PG_SHA256, SCRAM_SHA_256_KEY_LEN,
+								 iterations, errstr);
+}
+
+char *
+pg_fe_scram_build_secret_sm3(const char *password, int iterations, const char **errstr)
+{
+	return scram_build_secret_fe(password, PG_SM3, SCRAM_SM3_KEY_LEN,
+								 iterations, errstr);
 }

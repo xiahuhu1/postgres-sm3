@@ -106,6 +106,7 @@ cryptohash_internal(pg_cryptohash_type type, bytea *input)
 			break;
 		case PG_MD5:
 		case PG_SHA1:
+		case PG_SM3:
 			elog(ERROR, "unsupported cryptohash type %d", type);
 			break;
 	}

@@ -52,6 +52,7 @@ typedef enum pg_cryptohash_errno
 	PG_CRYPTOHASH_ERROR_NONE = 0,
 	PG_CRYPTOHASH_ERROR_DEST_LEN,
 	PG_CRYPTOHASH_ERROR_OPENSSL,
+	PG_CRYPTOHASH_ERROR_UNSUPPORTED,
 } pg_cryptohash_errno;
 
 /*
@@ -202,6 +203,14 @@ pg_cryptohash_init(pg_cryptohash_ctx *ctx)
 		case PG_SHA512:
 			status = EVP_DigestInit_ex(ctx->evpctx, EVP_sha512(), NULL);
 			break;
+		case PG_SM3:
+#ifdef HAVE_EVP_SM3
+			status = EVP_DigestInit_ex(ctx->evpctx, EVP_sm3(), NULL);
+			break;
+#else
+			ctx->error = PG_CRYPTOHASH_ERROR_UNSUPPORTED;
+			return -1;
+#endif
 	}
 
 	/* OpenSSL internals return 1 on success, 0 on failure */
@@ -233,6 +242,8 @@ pg_cryptohash_update(pg_cryptohash_ctx *ctx, const uint8 *data, size_t len)
 
 	if (ctx == NULL)
 		return -1;
+	if (ctx->error == PG_CRYPTOHASH_ERROR_UNSUPPORTED)
+		return -1;
 
 	status = EVP_DigestUpdate(ctx->evpctx, data, len);
 
@@ -257,6 +268,8 @@ pg_cryptohash_final(pg_cryptohash_ctx *ctx, uint8 *dest, size_t len)
 	int			status = 0;
 
 	if (ctx == NULL)
+		return -1;
+	if (ctx->error == PG_CRYPTOHASH_ERROR_UNSUPPORTED)
 		return -1;
 
 	switch (ctx->type)
@@ -298,6 +311,13 @@ pg_cryptohash_final(pg_cryptohash_ctx *ctx, uint8 *dest, size_t len)
 			break;
 		case PG_SHA512:
 			if (len < PG_SHA512_DIGEST_LENGTH)
+			{
+				ctx->error = PG_CRYPTOHASH_ERROR_DEST_LEN;
+				return -1;
+			}
+			break;
+		case PG_SM3:
+			if (len < PG_SM3_DIGEST_LENGTH)
 			{
 				ctx->error = PG_CRYPTOHASH_ERROR_DEST_LEN;
 				return -1;
@@ -370,6 +390,8 @@ pg_cryptohash_error(pg_cryptohash_ctx *ctx)
 			return _("destination buffer too small");
 		case PG_CRYPTOHASH_ERROR_OPENSSL:
 			return _("OpenSSL failure");
+		case PG_CRYPTOHASH_ERROR_UNSUPPORTED:
+			return _("SM3 is not supported by this build");
 	}
 
 	Assert(false);				/* cannot be reached */
