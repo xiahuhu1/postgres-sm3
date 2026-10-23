@@ -34,6 +34,6 @@ EXPOSE 5432
 VOLUME /var/lib/postgresql/data
 STOPSIGNAL SIGINT
 HEALTHCHECK --interval=10s --timeout=5s --start-period=30s --retries=6 \
-    CMD pg_isready -U postgres -d postgres || exit 1
+    CMD gosu postgres psql -X -w -h /var/run/postgresql -U postgres -d postgres -Atqc 'SELECT 1' || exit 1
 ENTRYPOINT ["docker-entrypoint.sh"]
 CMD ["postgres"]
