@@ -22,13 +22,14 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && chown -R postgres:postgres /var/lib/postgresql /var/run/postgresql
 COPY --from=build /usr/local/pgsql /usr/local/pgsql
 COPY deploy/sm3/docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
+COPY deploy/sm3/set-postgres-sha256.sql /usr/local/share/postgresql/set-postgres-sha256.sql
 ENV PATH=/usr/local/pgsql/bin:$PATH \
     LD_LIBRARY_PATH=/usr/local/pgsql/lib \
     PGDATA=/var/lib/postgresql/data \
     PGHOST=/var/run/postgresql \
     LANG=en_US.UTF-8
 LABEL org.opencontainers.image.title="PostgreSQL 17.10 SCRAM-SM3" \
-      org.opencontainers.image.version="17.10-sm3.2" \
+      org.opencontainers.image.version="17.10-sm3.3" \
       org.opencontainers.image.source="https://github.com/xiahuhu1/postgres-sm3"
 EXPOSE 5432
 VOLUME /var/lib/postgresql/data
