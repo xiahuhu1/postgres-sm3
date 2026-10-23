@@ -10,8 +10,15 @@ if [ "$(id -u)" = 0 ]; then
     exec gosu postgres "$0" "$@"
 fi
 if [ ! -s "$PGDATA/PG_VERSION" ]; then
+    SM3_PASSWORD_TMP=''
+    if [ -n "${POSTGRES_PASSWORD:-}" ] && [ -z "${POSTGRES_PASSWORD_FILE:-}" ]; then
+        SM3_PASSWORD_TMP=$(mktemp)
+        printf '%s\n' "$POSTGRES_PASSWORD" > "$SM3_PASSWORD_TMP"
+        POSTGRES_PASSWORD_FILE=$SM3_PASSWORD_TMP
+    fi
+    unset POSTGRES_PASSWORD
     if [ -z "${POSTGRES_PASSWORD_FILE:-}" ] || [ ! -s "$POSTGRES_PASSWORD_FILE" ]; then
-        echo 'New clusters require a nonempty POSTGRES_PASSWORD_FILE.' >&2
+        echo 'New clusters require POSTGRES_PASSWORD or a nonempty POSTGRES_PASSWORD_FILE.' >&2
         exit 1
     fi
     SM3_INITIAL_PASSWORD=''
@@ -24,6 +31,9 @@ if [ ! -s "$PGDATA/PG_VERSION" ]; then
     unset SM3_INITIAL_PASSWORD
     initdb -D "$PGDATA" --username=postgres --auth-local=peer \
         --auth-host=scram-sm3 --pwfile="$POSTGRES_PASSWORD_FILE" --encoding=UTF8
+    if [ -n "$SM3_PASSWORD_TMP" ]; then
+        rm -f "$SM3_PASSWORD_TMP"
+    fi
     cat >> "$PGDATA/postgresql.conf" <<'CONF'
 listen_addresses = '*'
 password_encryption = 'scram-sm3'
