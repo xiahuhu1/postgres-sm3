@@ -28,8 +28,8 @@ ENV PATH=/usr/local/pgsql/bin:$PATH \
     PGDATA=/var/lib/postgresql/data \
     PGHOST=/var/run/postgresql \
     LANG=en_US.UTF-8
-LABEL org.opencontainers.image.title="PostgreSQL 17.10 SCRAM-SM3" \
-      org.opencontainers.image.version="17.10-sm3.3" \
+LABEL org.opencontainers.image.title="PostgreSQL 17.12 SCRAM-SM3" \
+      org.opencontainers.image.version="17.12-sm3.3" \
       org.opencontainers.image.source="https://github.com/xiahuhu1/postgres-sm3"
 EXPOSE 5432
 VOLUME /var/lib/postgresql/data
